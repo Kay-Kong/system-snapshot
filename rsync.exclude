@@ -1,0 +1,125 @@
+# /etc/system-snapshot/rsync.exclude
+
+# Virtual/runtime filesystems.
+/proc/**
+/sys/**
+/dev/**
+/run/**
+/tmp/**
+
+# Mount points / removable / temporary mount locations.
+/mnt/**
+/media/**
+/cdrom/**
+
+# Filesystem internals.
+/lost+found/
+/boot/lost+found/
+
+# Already on the HDD, do not back up into the system mirror.
+/var/backups/**
+/var/crash/**
+
+# System-level rebuildable caches and bulky transient state.
+# These directory patterns exclude the directory itself and all contents.
+/var/cache/
+/var/tmp/
+/var/lib/apt/lists/
+/var/lib/systemd/coredump/
+/var/lib/snapd/cache/
+
+# User caches and generated tool state.
+# .cache covers pip, uv, torch, huggingface, npm/yarn XDG caches, Zed caches,
+# browser caches, and many other application caches.
+/root/**/.cache/
+/home/**/.cache/
+/home/**/.local/share/Trash/
+
+# Remote editor/agent servers.
+/home/**/.vscode-server*/
+/home/**/.cursor-server/
+/home/**/.windsurf-server/
+/home/**/.antigravity/
+/home/**/.zed_server/
+/home/**/.kiro-server/
+/home/**/.trae-server/
+/home/**/.continue/server/
+/home/**/.cache/code-server/
+/home/**/.local/share/code-server/
+
+# AI coding agent disposable state.
+# Exclude bulky session/cache/log/checkpoint state.
+/home/**/.claude/file-history/
+/home/**/.claude/debug/
+/home/**/.claude/plans/
+/home/**/.claude/paste-cache/
+/home/**/.claude/image-cache/
+/home/**/.claude/session-env/
+/home/**/.claude/tasks/
+/home/**/.claude/shell-snapshots/
+/home/**/.claude/backups/
+/home/**/.claude/todos/
+/home/**/.claude/projects/*/*/tool-results/
+/home/**/.gemini/tmp/
+/home/**/.gemini/cache/
+/home/**/.codex/cache/
+/home/**/.codex/logs/
+/home/**/.codex/sessions/
+/home/**/.config/Antigravity/CachedData/
+/home/**/.config/Antigravity/Code Cache/
+/home/**/.config/Antigravity/GPUCache/
+/home/**/.config/Antigravity/Crashpad/
+/home/**/.config/Antigravity/logs/
+/home/**/.cache/Antigravity/
+/home/**/.cache/Google/Antigravity/
+
+# Language/package manager caches outside ~/.cache.
+/root/.npm/
+/root/.nv/ComputeCache/
+/home/**/.npm/
+/home/**/.node-gyp/
+/home/**/.pnpm-store/
+/home/**/.yarn/cache/
+/home/**/.cargo/registry/
+/home/**/.cargo/git/
+/home/**/.rustup/downloads/
+/home/**/.rustup/tmp/
+/home/**/go/pkg/mod/
+/home/**/go/pkg/sumdb/
+/home/**/.conda/pkgs/
+/home/**/.mamba/pkgs/
+/home/**/.micromamba/pkgs/
+/home/**/miniconda3/pkgs/
+/home/**/anaconda3/pkgs/
+/home/**/.gradle/caches/
+/home/**/.gradle/daemon/
+/home/**/.m2/repository/
+/home/**/.ivy2/cache/
+/home/**/.sbt/
+/home/**/.julia/compiled/
+/home/**/.julia/logs/
+
+# ML/GPU/generated caches outside ~/.cache.
+/home/**/.triton/
+/home/**/.nv/ComputeCache/
+/home/**/.ccache/
+
+# Project-local dependency/build state.
+/home/**/.pixi/
+/home/**/.venv/
+/home/**/venv/
+/home/**/node_modules/
+/home/**/.tox/
+/home/**/.nox/
+/home/**/.pytest_cache/
+/home/**/.mypy_cache/
+/home/**/.ruff_cache/
+/home/**/.ipynb_checkpoints/
+/home/**/__pycache__/
+/home/**/*.pyc
+/home/**/.terraform/
+
+# Optional huge/volatile stores.
+/var/lib/docker/**
+/var/lib/containers/**
+/var/lib/libvirt/images/**

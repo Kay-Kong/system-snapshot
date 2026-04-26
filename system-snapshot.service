@@ -1,0 +1,13 @@
+# /etc/systemd/system/system-snapshot.service
+
+[Unit]
+Description=Rsync system mirror and create Btrfs snapshot
+ConditionPathIsMountPoint=/var/backups/
+ConditionACPower=true
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+ExecStart=/usr/local/sbin/system-snapshot
