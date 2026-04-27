@@ -1,6 +1,5 @@
 [Unit]
 Description=Rsync system mirror and create Btrfs snapshot
-ConditionPathIsMountPoint=/var/backups/
 ConditionACPower=true
 
 [Service]

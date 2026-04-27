@@ -3,6 +3,24 @@ CONFIG_FILE='/etc/system-snapshot/system-snapshot.conf'
 
 set -euo pipefail
 
+EXIT_HOOKS=()
+
+on_exit() {
+	EXIT_HOOKS+=("$*")
+	trap run_exit_hooks EXIT
+}
+
+run_exit_hooks() {
+	local status=$? hook
+
+	trap - EXIT
+	set +e
+	for hook in "${EXIT_HOOKS[@]}"; do
+		eval "$hook"
+	done
+	exit "$status"
+}
+
 # Logging helpers
 info() {
 	echo "[Info] $*" >&2
@@ -18,17 +36,6 @@ fatal() {
 
 MIN_BACKUP_INTERVAL=$((MIN_BACKUP_INTERVAL_DAYS * 24 * 3600))
 
-require_safe_paths() {
-	# Guard rails against a bad config causing rsync --delete to target the
-	# wrong place. Keep these intentionally strict.
-	[[ -n ${BASE:-} ]] || fatal "BASE not set in $CONFIG_FILE"
-	[[ -n ${MIRROR:-} ]] || fatal "MIRROR not set in $CONFIG_FILE"
-	[[ $BASE == /var/backups/local/system ]] || fatal "Unexpected BASE: $BASE"
-	[[ $MIRROR == "$BASE/mirror" ]] || fatal "Unexpected MIRROR: $MIRROR"
-	[[ $MIRROR != '/' ]] || fatal 'Refusing to use / as mirror'
-	[[ $MIRROR != '/var/backups' ]] || fatal 'Refusing to use /var/backups as mirror'
-}
-
 last_success_epoch() {
 	if [[ -f $LAST_SUCCESS_FILE ]]; then
 		stat -c %Y "$LAST_SUCCESS_FILE"
@@ -41,25 +48,43 @@ is_due() {
 	# The timer fires twice daily but a real backup only runs once per
 	# MIN_BACKUP_INTERVAL_DAYS. A failed run leaves LAST_SUCCESS_FILE stale,
 	# so the next timer firing (~12h later) retries automatically.
-	local now last
-	now="$(date +%s)"
-	last="$(last_success_epoch)"
+	local now="$(date +%s)" last="$(last_success_epoch)"
 	((now - last >= MIN_BACKUP_INTERVAL))
 }
 
-create_layout() {
-	# The rsync destination should be a Btrfs subvolume so btrbk can snapshot it.
-	if [[ -e $MIRROR ]]; then
-		btrfs subvolume show "$MIRROR" >/dev/null 2>&1 ||
-			fatal "$MIRROR exists but is not a Btrfs subvolume"
-	else
-		info "Creating Btrfs subvolume: $MIRROR"
-		btrfs subvolume create "$MIRROR"
+check_paths() {
+	# Config sanity (cheap, no side effects). Run before create_layout so a
+	# bogus $MIRROR can't cause a chmod 700 / disaster.
+	local name value
+	for name in \
+		MIRROR BACKUPS SNAPSHOTS \
+		STATE_DIR LAST_SUCCESS_FILE LIVE_METADATA_DIR \
+		LOCK BTRBK_CONFIG_FILE RSYNC_EXCLUDE_FILE; do
+			value=${!name:-}
+			[[ -n $value ]] || fatal "$name not set in $CONFIG_FILE"
+			[[ $value == /* ]] || fatal "$name must be absolute: $value"
+			[[ $value != '/' ]] || fatal "$name cannot be /"
+			[[ $value != *'..'* ]] || fatal "$name cannot contain '..': $value"
+	done
+	[[ $MIRROR != "$BACKUPS" ]] || fatal "MIRROR cannot equal BACKUPS"
+}
+
+check_mounts() {
+	# Prevent silently filling up the root filesystem
+	findmnt -rn -t btrfs --mountpoint "$BACKUPS" >/dev/null 2>&1 ||
+		fatal "$BACKUPS is not mounted"
+
+	if ! findmnt -rn --mountpoint "$MIRROR" >/dev/null 2>&1; then
+		mkdir -p "$MIRROR"
+		chmod 700 "$MIRROR"
+
+		info "Mounting $MIRROR"
+
+		mount "$MIRROR" || fatal "Failed to mount $MIRROR"
+		on_exit 'umount -l "$MIRROR" >/dev/null 2>&1 || true'
 	fi
-
-	mkdir -p "$STATE_DIR" "$LIVE_METADATA_DIR" "$BASE" "$SNAPSHOTS"
-
-	chmod 700 "$STATE_DIR" "$LIVE_METADATA_DIR" "$BASE" "$MIRROR" "$SNAPSHOTS"
+	btrfs subvolume show "$MIRROR" >/dev/null 2>&1 ||
+		fatal "$MIRROR is not a Btrfs subvolume"
 }
 
 write_metadata() {
@@ -100,7 +125,7 @@ write_metadata() {
 	getent passwd >"$LIVE_METADATA_DIR/users.passwd.txt" || true
 }
 
-run_rsync_system() {
+run_rsync() {
 	info "Starting rsync mirror: / -> $MIRROR/"
 	local rc=0
 	rsync \
@@ -123,7 +148,15 @@ run_rsync_system() {
 
 run_btrbk() {
 	info 'Running btrbk snapshot/prune'
-	btrbk -c "$BTRBK_CONFIG_FILE" run 1>&2
+	# Generate a runtime config: static policy from $BTRBK_CONFIG_FILE plus the
+	# path-dependent volume block from $MIRROR / $SNAPSHOTS.
+	local conf='/run/system-snapshot.btrbk.conf'
+	{
+		cat "$BTRBK_CONFIG_FILE"
+		printf '\nvolume %s\n\tsubvolume .\n\t\tsnapshot_dir %s/\n' \
+			"$MIRROR" "$SNAPSHOTS"
+	} >"$conf"
+	btrbk -c "$conf" run 1>&2
 }
 
 main() {
@@ -139,33 +172,33 @@ main() {
 	*) fatal "Unknown argument: $1" ;;
 	esac
 
-	# Avoid overlapping runs if the timer fires while a previous backup is still
-	# active. The lock disappears automatically on reboot because it is in /run.
-	exec 9>"$LOCK"
-	flock -n 9 || exit 0
-
-	require_safe_paths
-
-	findmnt -rn --mountpoint /var/backups >/dev/null 2>&1 ||
-		fatal '/var/backups is not mounted'
-
-	findmnt -rn -t btrfs --mountpoint /var/backups >/dev/null 2>&1 ||
-		fatal '/var/backups is not a Btrfs mount'
-
-	create_layout
-
-	if [[ ${1:-} == '--init' ]]; then
-		info 'Initialized layout only'
-		exit 0
-	fi
+	check_paths
 
 	if ((ignore_cadence == 0)) && ! is_due; then
 		info "Not due---last successful backup was less than ${MIN_BACKUP_INTERVAL_DAYS} days ago. Pass \`--now\` to run anyway."
 		exit 0
 	fi
 
+	# Lock; complain loudly on contention rather than silently skipping.
+	exec 9>"$LOCK"
+	if ! flock -n 9; then
+		info 'Another instance is running; exiting'
+		exit 0
+	fi
+	on_exit 'rm -f "$LOCK"'
+
+	check_mounts
+
+	mkdir -p "$STATE_DIR" "$LIVE_METADATA_DIR" "$SNAPSHOTS"
+	chmod 700 "$STATE_DIR" "$LIVE_METADATA_DIR" "$SNAPSHOTS"
+
+	if [[ ${1:-} == '--init' ]]; then
+		info 'Initialized layout only'
+		exit 0
+	fi
+
 	write_metadata
-	run_rsync_system
+	run_rsync
 	run_btrbk
 
 	date --iso-8601=seconds >"$LAST_SUCCESS_FILE"
