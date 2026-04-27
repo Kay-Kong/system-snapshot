@@ -1,5 +1,3 @@
-# /etc/system-snapshot/rsync.exclude
-
 # Virtual/runtime filesystems.
 /dev/**
 /proc/**

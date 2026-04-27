@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# /usr/local/sbin/system-snapshot
+CONFIG_FILE='/etc/system-snapshot/system-snapshot.conf'
 
 set -euo pipefail
 
@@ -13,17 +13,16 @@ fatal() {
 	exit 1
 }
 
-CONFIG='/etc/system-snapshot/config'
-[[ -r $CONFIG ]] || fatal "Missing config: $CONFIG"
-. "$CONFIG"
+[[ -r $CONFIG_FILE ]] || fatal "Missing config: $CONFIG_FILE"
+. "$CONFIG_FILE"
 
 MIN_BACKUP_INTERVAL=$((MIN_BACKUP_INTERVAL_DAYS * 24 * 3600))
 
 require_safe_paths() {
 	# Guard rails against a bad config causing rsync --delete to target the
 	# wrong place. Keep these intentionally strict.
-	[[ -n ${BASE:-} ]] || fatal 'BASE is empty'
-	[[ -n ${MIRROR:-} ]] || fatal 'MIRROR is empty'
+	[[ -n ${BASE:-} ]] || fatal "BASE not set in $CONFIG_FILE"
+	[[ -n ${MIRROR:-} ]] || fatal "MIRROR not set in $CONFIG_FILE"
 	[[ $BASE == /var/backups/local/system ]] || fatal "Unexpected BASE: $BASE"
 	[[ $MIRROR == "$BASE/mirror" ]] || fatal "Unexpected MIRROR: $MIRROR"
 	[[ $MIRROR != '/' ]] || fatal 'Refusing to use / as mirror'

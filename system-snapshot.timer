@@ -1,5 +1,3 @@
-# /etc/systemd/system/system-snapshot.timer
-
 [Unit]
 Description=Try system snapshot when due
 

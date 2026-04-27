@@ -1,5 +1,3 @@
-# /etc/systemd/system/system-snapshot.service
-
 [Unit]
 Description=Rsync system mirror and create Btrfs snapshot
 ConditionPathIsMountPoint=/var/backups/
