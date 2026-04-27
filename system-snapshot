@@ -3,187 +3,141 @@
 
 set -euo pipefail
 
-# Main config file.
-CONFIG='/etc/system-snapshot/config'
-
-if [[ ! -r "$CONFIG" ]]; then
-	echo "Missing config: $CONFIG" >&2
-	exit 1
-fi
-
-. "$CONFIG"
-
-# Convert human-readable config values to seconds once.
-MIN_BACKUP_INTERVAL=$((MIN_BACKUP_INTERVAL_DAYS * 24 * 3600))
-MAX_BACKUP_AGE=$((MAX_BACKUP_AGE_DAYS * 24 * 3600))
-
-log() {
-	# systemd captures service stdout/stderr into the journal by default, so this
-	# is enough for `journalctl -u system-snapshot.service`.
-	echo "$(date --iso-8601=seconds) $*" >&2
+# Logging helpers
+info() {
+	echo "[Info] $*" >&2
 }
 
 fatal() {
-	log "ERROR: $*"
+	echo "[ERROR] $*" >&2
 	exit 1
 }
 
+CONFIG='/etc/system-snapshot/config'
+[[ -r $CONFIG ]] || fatal "Missing config: $CONFIG"
+. "$CONFIG"
+
+MIN_BACKUP_INTERVAL=$((MIN_BACKUP_INTERVAL_DAYS * 24 * 3600))
+
 require_safe_paths() {
-	# Guard rails against a bad config causing rsync --delete to target the wrong
-	# place. Keep these intentionally strict.
-	[[ -n "${BASE:-}" ]] || fatal 'BASE is empty'
-	[[ -n "${MIRROR:-}" ]] || fatal 'MIRROR is empty'
-	[[ "$BASE" == /var/backups/local/system ]] || fatal "Unexpected BASE: $BASE"
-	[[ "$MIRROR" == "$BASE/mirror" ]] || fatal "Unexpected MIRROR: $MIRROR"
-	[[ "$MIRROR" != '/' ]] || fatal 'Refusing to use / as mirror'
-	[[ "$MIRROR" != '/var/backups' ]] || fatal 'Refusing to use /var/backups as mirror'
+	# Guard rails against a bad config causing rsync --delete to target the
+	# wrong place. Keep these intentionally strict.
+	[[ -n ${BASE:-} ]] || fatal 'BASE is empty'
+	[[ -n ${MIRROR:-} ]] || fatal 'MIRROR is empty'
+	[[ $BASE == /var/backups/local/system ]] || fatal "Unexpected BASE: $BASE"
+	[[ $MIRROR == "$BASE/mirror" ]] || fatal "Unexpected MIRROR: $MIRROR"
+	[[ $MIRROR != '/' ]] || fatal 'Refusing to use / as mirror'
+	[[ $MIRROR != '/var/backups' ]] || fatal 'Refusing to use /var/backups as mirror'
 }
 
 last_success_epoch() {
-	# If the marker does not exist, pretend the last success was at Unix time 0.
-	# That makes the first run due immediately.
-	if [[ -f "$LAST_SUCCESS" ]]; then
-		stat -c %Y "$LAST_SUCCESS"
+	if [[ -f $LAST_SUCCESS_FILE ]]; then
+		stat -c %Y "$LAST_SUCCESS_FILE"
 	else
 		echo 0
 	fi
 }
 
-backup_age_seconds() {
+is_due() {
+	# The timer fires twice daily but a real backup only runs once per
+	# MIN_BACKUP_INTERVAL_DAYS. A failed run leaves LAST_SUCCESS_FILE stale,
+	# so the next timer firing (~12h later) retries automatically.
 	local now last
 	now="$(date +%s)"
 	last="$(last_success_epoch)"
-	echo $((now - last))
-}
-
-is_due() {
-	# The timer retries every few hours, but this check makes a real backup run
-	# only after MIN_BACKUP_INTERVAL_DAYS since the last successful run.
-	(( $(backup_age_seconds) >= MIN_BACKUP_INTERVAL ))
-}
-
-max_backup_age_reached() {
-	# If MAX_BACKUP_AGE_DAYS is 0, never bypass the idle check.
-	# Otherwise, bypass idle once the backup is too old.
-	(( MAX_BACKUP_AGE_DAYS > 0 )) && (( $(backup_age_seconds) >= MAX_BACKUP_AGE ))
-}
-
-idle_ok() {
-	# Use the 1-minute load average because the question is whether the system is
-	# currently quiet enough to start the backup. The 5-minute average is smoother
-	# but can keep saying "busy" for several minutes after the system settles.
-	#
-	# Load average is not exactly "busy CPU cores." It counts runnable tasks plus
-	# tasks waiting in uninterruptible I/O. That is useful here because an HDD
-	# backup should avoid both CPU-heavy and I/O-heavy periods.
-	local load
-	load="$(awk '{print $1}' /proc/loadavg)"
-
-	log "Idle check: 1min_load=$load max_start_load=$MAX_START_LOAD logical_cpus=$(nproc)"
-	awk -v l="$load" -v max="$MAX_START_LOAD" 'BEGIN { exit !(l <= max) }'
+	((now - last >= MIN_BACKUP_INTERVAL))
 }
 
 create_layout() {
-	# Only /etc/system-snapshot must be created manually to install config files.
-	# The state directory and backup layout are generated here.
-	mkdir -p "$STATE_DIR"
-	mkdir -p "$BASE" "$SNAPSHOTS" "$METADATA"
-
 	# The rsync destination should be a Btrfs subvolume so btrbk can snapshot it.
-	if [[ -e "$MIRROR" ]]; then
-		btrfs subvolume show "$MIRROR" >/dev/null 2>&1 \
-			|| fatal "$MIRROR exists but is not a Btrfs subvolume"
+	if [[ -e $MIRROR ]]; then
+		btrfs subvolume show "$MIRROR" >/dev/null 2>&1 ||
+			fatal "$MIRROR exists but is not a Btrfs subvolume"
 	else
-		log "Creating Btrfs subvolume: $MIRROR"
+		info "Creating Btrfs subvolume: $MIRROR"
 		btrfs subvolume create "$MIRROR"
 	fi
 
-	chmod 700 "$BASE" "$MIRROR" "$SNAPSHOTS" "$METADATA"
+	mkdir -p "$STATE_DIR" "$LIVE_METADATA_DIR" "$BASE" "$SNAPSHOTS"
+
+	chmod 700 "$STATE_DIR" "$LIVE_METADATA_DIR" "$BASE" "$MIRROR" "$SNAPSHOTS"
 }
 
 write_metadata() {
-	# These files are not part of the root mirror. They are small recovery notes
-	# that help rebuild the machine after a disk failure or bad upgrade.
-	local run_dir apt_sources_dir
+	# Recovery notes — small command outputs captured at backup time. Written
+	# under STATE_DIR on the live root so the rsync system pass mirrors them
+	# and btrbk's snapshot freezes a per-snapshot copy.
 
-	run_dir="$METADATA/$(date +%Y-%m-%dT%H-%M-%S)"
-	apt_sources_dir="$run_dir/apt.sources.list.d"
+	# Kernel.
+	uname -a >"$LIVE_METADATA_DIR/kernel.uname.txt" || true
 
-	mkdir -p "$run_dir"
-
+	# Packages — dpkg covers .deb; snap and flatpak are separate ecosystems
+	# that aren't reflected in dpkg state.
 	dpkg-query -W -f='${binary:Package}\t${Version}\n' \
-		> "$run_dir/packages.all.txt" || true
-
+		>"$LIVE_METADATA_DIR/packages.all.txt" || true
 	apt-mark showmanual \
-		> "$run_dir/packages.manual.txt" || true
+		>"$LIVE_METADATA_DIR/packages.manual.txt" || true
+	if command -v flatpak >/dev/null; then
+		flatpak list --columns=application,version,branch,origin \
+			>"$LIVE_METADATA_DIR/packages.flatpak.txt" || true
+	fi
+	if command -v snap >/dev/null; then
+		snap list \
+			>"$LIVE_METADATA_DIR/packages.snap.txt" || true
+	fi
 
-	cp -a /etc/apt/sources.list "$run_dir/apt.sources.list" 2>/dev/null || true
-	cp -a /etc/apt/sources.list.d "$apt_sources_dir" 2>/dev/null || true
+	# Services.
+	systemctl list-unit-files --state=enabled \
+		>"$LIVE_METADATA_DIR/services.enabled.txt" || true
 
-	lsblk -f > "$run_dir/lsblk.txt" || true
-	findmnt > "$run_dir/findmnt.txt" || true
-	blkid > "$run_dir/blkid.txt" || true
-	uname -a > "$run_dir/uname.txt" || true
-	cp -a /etc/os-release "$run_dir/os-release.txt" 2>/dev/null || true
+	# Storage.
+	blkid >"$LIVE_METADATA_DIR/storage.blkid.txt" || true
+	findmnt >"$LIVE_METADATA_DIR/storage.findmnt.txt" || true
+	lsblk -f >"$LIVE_METADATA_DIR/storage.lsblk.txt" || true
 
-	# Keep metadata small. The files are tiny, but 180 days is plenty.
-	find "$METADATA" -mindepth 1 -maxdepth 1 -type d -mtime +180 -exec rm -rf {} +
+	# Users and groups — NSS-resolved view picks up LDAP/AD/SSSD sources that
+	# aren't visible in /etc/passwd alone.
+	getent group >"$LIVE_METADATA_DIR/users.group.txt" || true
+	getent passwd >"$LIVE_METADATA_DIR/users.passwd.txt" || true
 }
 
 run_rsync_system() {
-	log "Starting rsync mirror: / -> $MIRROR/"
-
-	rsync -aAXHxhi \
-		--numeric-ids \
+	info "Starting rsync mirror: / -> $MIRROR/"
+	local rc=0
+	rsync \
+		--info=del1,progress2,stats2 \
+		--checksum \
+		--archive \
+		--hard-links \
+		--acls \
+		--xattrs \
+		--one-file-system \
 		--delete-delay \
 		--delete-excluded \
-		--exclude-from="$RSYNC_EXCLUDE" \
-		--info=stats2,delete1 \
-		/ "$MIRROR/"
-}
-
-run_rsync_boot_if_needed() {
-	# --one-file-system prevents the root pass from crossing into separate
-	# filesystems. If /boot or /boot/efi are separate mounts, copy them explicitly.
-	if findmnt -rn --mountpoint /boot >/dev/null 2>&1; then
-		log 'Backing up separate /boot filesystem'
-		mkdir -p "$MIRROR/boot"
-		rsync -aAXHhi \
-			--numeric-ids \
-			--delete-delay \
-			/boot/ "$MIRROR/boot/"
-	fi
-
-	if findmnt -rn --mountpoint /boot/efi >/dev/null 2>&1; then
-		log 'Backing up separate /boot/efi filesystem'
-		mkdir -p "$MIRROR/boot/efi"
-		rsync -ahi \
-			--delete-delay \
-			/boot/efi/ "$MIRROR/boot/efi/"
-	fi
+		--numeric-ids \
+		--exclude-from="$RSYNC_EXCLUDE_FILE" \
+		--human-readable \
+		/ "$MIRROR/" 1>&2 || rc=$?
+	# exit 24 is "some files vanished before transfer,"  benign on a live root.
+	((rc == 0 || rc == 24)) || return $rc
 }
 
 run_btrbk() {
-	# btrbk snapshots the Btrfs mirror, not the live EXT4 root filesystem.
-	log 'Running btrbk snapshot/prune'
-	btrbk -c "$BTRBK_CONFIG" run
+	info 'Running btrbk snapshot/prune'
+	btrbk -c "$BTRBK_CONFIG_FILE" run 1>&2
 }
 
 main() {
-	local force_run=0
+	local ignore_cadence=0
 
-	case "${1:-}" in
-		--force)
-			# Manual forced runs skip the due and idle checks. They still update
-			# LAST_SUCCESS at the end, so the next automatic run is pushed out by
-			# MIN_BACKUP_INTERVAL_DAYS.
-			force_run=1
-			;;
-		--init|"")
-			;;
-		*)
-			fatal "Unknown argument: $1"
-			;;
+	if (($# > 1)); then
+		fatal "Too many arguments: $*"
+	fi
+
+	case ${1:-} in
+	--now) ignore_cadence=1 ;;
+	--init | '') ;;
+	*) fatal "Unknown argument: $1" ;;
 	esac
 
 	# Avoid overlapping runs if the timer fires while a previous backup is still
@@ -193,40 +147,31 @@ main() {
 
 	require_safe_paths
 
-	if ! findmnt -rn --mountpoint /var/backups >/dev/null 2>&1; then
+	findmnt -rn --mountpoint /var/backups >/dev/null 2>&1 ||
 		fatal '/var/backups is not mounted'
-	fi
 
-	if ! findmnt -rn -t btrfs --mountpoint /var/backups >/dev/null 2>&1; then
+	findmnt -rn -t btrfs --mountpoint /var/backups >/dev/null 2>&1 ||
 		fatal '/var/backups is not a Btrfs mount'
-	fi
 
 	create_layout
 
-	# Optional initialization mode. Useful before running rsync dry-runs manually.
-	if [[ "${1:-}" == "--init" ]]; then
-		log 'Initialized layout only'
+	if [[ ${1:-} == '--init' ]]; then
+		info 'Initialized layout only'
 		exit 0
 	fi
 
-	if (( force_run == 0 )) && ! is_due; then
-		log "Skipping: last successful backup is newer than ${MIN_BACKUP_INTERVAL_DAYS}d"
-		exit 0
-	fi
-
-	if (( force_run == 0 )) && ! max_backup_age_reached && ! idle_ok; then
-		log 'Skipping: backup is due, but system is not idle enough'
+	if ((ignore_cadence == 0)) && ! is_due; then
+		info "Not due---last successful backup was less than ${MIN_BACKUP_INTERVAL_DAYS} days ago. Pass \`--now\` to run anyway."
 		exit 0
 	fi
 
 	write_metadata
 	run_rsync_system
-	run_rsync_boot_if_needed
 	run_btrbk
 
-	date --iso-8601=seconds > "$LAST_SUCCESS"
+	date --iso-8601=seconds >"$LAST_SUCCESS_FILE"
 
-	log 'Backup completed successfully'
+	info 'Backup completed successfully'
 }
 
 main "$@"

@@ -4,31 +4,21 @@
 BASE='/var/backups/local/system'
 MIRROR="$BASE/mirror"
 SNAPSHOTS="$BASE/snapshots"
-METADATA="$BASE/metadata"
 
 # Config files.
 CONFIG_DIR='/etc/system-snapshot'
-RSYNC_EXCLUDE="$CONFIG_DIR/rsync.exclude"
-BTRBK_CONFIG="$CONFIG_DIR/btrbk.conf"
+BTRBK_CONFIG_FILE="$CONFIG_DIR/btrbk.conf"
+RSYNC_EXCLUDE_FILE="$CONFIG_DIR/rsync.exclude"
 
-# Persistent state.
+# Persistent state on the live root.
 STATE_DIR='/var/lib/system-snapshot'
-LAST_SUCCESS="$STATE_DIR/last-success"
+LAST_SUCCESS_FILE="$STATE_DIR/last-success"
+LIVE_METADATA_DIR="$STATE_DIR/metadata"
 
 # Runtime lock. Prevent concurrent runs.
 LOCK='/run/system-snapshot.lock'
 
-# Scheduling policy. The timer retries periodically, but the script only runs
+# Scheduling policy. The timer fires twice daily, but the script only runs
 # a real backup after this many days since the last successful backup.
-# A manual forced run updates LAST_SUCCESS too, so it resets the next automatic run.
+# A manual forced run updates LAST_SUCCESS_FILE too, so it resets the next automatic run.
 MIN_BACKUP_INTERVAL_DAYS=30
-
-# If the backup reaches this age, run even if the idle check is not perfect.
-# Set to 0 to never bypass the idle check.
-MAX_BACKUP_AGE_DAYS=45
-
-# Idle policy. The script uses the 1-minute load average from /proc/loadavg.
-# On the Ryzen 9 9950X, `nproc` normally reports 32 logical CPUs.
-# MAX_START_LOAD=4 means roughly "start only when the machine has about
-# 28 logical CPUs worth of headroom," but load average is not exact CPU usage.
-MAX_START_LOAD=4

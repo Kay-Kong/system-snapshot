@@ -1,13 +1,13 @@
 # /etc/systemd/system/system-snapshot.timer
 
 [Unit]
-Description=Try system snapshot when due and idle
+Description=Try system snapshot when due
 
 [Timer]
-OnBootSec=30min
-OnUnitInactiveSec=3h
-AccuracySec=1h
+OnCalendar=0,12:00
 RandomizedDelaySec=30min
+AccuracySec=15min
+Persistent=true
 
 [Install]
 WantedBy=timers.target

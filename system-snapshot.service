@@ -11,3 +11,15 @@ Nice=19
 IOSchedulingClass=idle
 CPUSchedulingPolicy=idle
 ExecStart=/usr/local/sbin/system-snapshot
+
+# Sandboxing.
+LockPersonality=true
+MemoryDenyWriteExecute=true
+NoNewPrivileges=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelTunables=true
+RestrictNamespaces=true
+RestrictRealtime=true
+SystemCallArchitectures=native
