@@ -1,0 +1,23 @@
+# Mirror mount point. fstab should mount the backup subvolume here.
+MIRROR_MNT='/mnt/mirror'
+
+# Backup Btrfs filesystem mount point.
+BACKUP_MNT='/var/backups'
+
+# btrbk snapshot destination, on the same Btrfs filesystem as MIRROR_MNT.
+SNAPSHOT_DIR="$BACKUP_MNT/local/system-snapshots"
+
+# Config files.
+CONFIG_DIR='/etc/system-snapshot'
+BTRBK_CONF="$CONFIG_DIR/btrbk.conf"
+RSYNC_EXCLUDE="$CONFIG_DIR/rsync.exclude"
+
+# Persistent state on the live root.
+STATE_DIR='/var/lib/system-snapshot'
+LAST_SUCCESS="$STATE_DIR/last-success"
+METADATA_DIR="$STATE_DIR/metadata"
+
+LOCK='/run/system-snapshot.lock'
+
+# Timer fires twice daily; real backups run after this many days.
+MIN_INTERVAL_DAYS=30

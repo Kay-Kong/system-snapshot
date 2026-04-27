@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-CONFIG_FILE='/etc/system-snapshot/system-snapshot.conf'
+CONFIG='/etc/system-snapshot/system-snapshot.rc'
 
 set -euo pipefail
 
-EXIT_HOOKS=()
+[[ -r $CONFIG ]] || fatal "Missing config: $CONFIG"
+. "$CONFIG"
 
+MIN_INTERVAL=$((MIN_INTERVAL_DAYS * 24 * 3600))
+
+exit_hooks=()
 on_exit() {
-	EXIT_HOOKS+=("$*")
+	exit_hooks=("$1" "${exit_hooks[@]}")
 	trap run_exit_hooks EXIT
 }
 
@@ -15,118 +19,116 @@ run_exit_hooks() {
 
 	trap - EXIT
 	set +e
-	for hook in "${EXIT_HOOKS[@]}"; do
-		eval "$hook"
+	for hook in "${exit_hooks[@]}"; do
+		"$hook"
 	done
 	exit "$status"
 }
 
-# Logging helpers
 info() {
-	echo "[Info] $*" >&2
+	printf '[INFO] %s\n' "$*" >&2
 }
 
 fatal() {
-	echo "[ERROR] $*" >&2
+	printf '[ERROR] %s\n' "$*" >&2
 	exit 1
 }
 
-[[ -r $CONFIG_FILE ]] || fatal "Missing config: $CONFIG_FILE"
-. "$CONFIG_FILE"
-
-MIN_BACKUP_INTERVAL=$((MIN_BACKUP_INTERVAL_DAYS * 24 * 3600))
-
-last_success_epoch() {
-	if [[ -f $LAST_SUCCESS_FILE ]]; then
-		stat -c %Y "$LAST_SUCCESS_FILE"
-	else
-		echo 0
-	fi
-}
-
 is_due() {
-	# The timer fires twice daily but a real backup only runs once per
-	# MIN_BACKUP_INTERVAL_DAYS. A failed run leaves LAST_SUCCESS_FILE stale,
-	# so the next timer firing (~12h later) retries automatically.
-	local now="$(date +%s)" last="$(last_success_epoch)"
-	((now - last >= MIN_BACKUP_INTERVAL))
+	local now="$(date +%s)" last=0
+
+	if [[ -f $LAST_SUCCESS ]]; then
+		last="$(stat -c %Y "$LAST_SUCCESS")"
+	fi
+
+	((now - last >= MIN_INTERVAL))
 }
 
 check_paths() {
-	# Config sanity (cheap, no side effects). Run before create_layout so a
-	# bogus $MIRROR can't cause a chmod 700 / disaster.
 	local name value
 	for name in \
-		MIRROR BACKUPS SNAPSHOTS \
-		STATE_DIR LAST_SUCCESS_FILE LIVE_METADATA_DIR \
-		LOCK BTRBK_CONFIG_FILE RSYNC_EXCLUDE_FILE; do
-			value=${!name:-}
-			[[ -n $value ]] || fatal "$name not set in $CONFIG_FILE"
-			[[ $value == /* ]] || fatal "$name must be absolute: $value"
-			[[ $value != '/' ]] || fatal "$name cannot be /"
-			[[ $value != *'..'* ]] || fatal "$name cannot contain '..': $value"
+		MIRROR_MNT BACKUP_MNT SNAPSHOT_DIR \
+		STATE_DIR LAST_SUCCESS METADATA_DIR \
+		LOCK BTRBK_CONF RSYNC_EXCLUDE; do
+		value=${!name:-}
+		[[ -n $value ]] || fatal "$name not set in $CONFIG"
+		[[ $value == /* ]] || fatal "$name must be absolute: $value"
+		[[ $value != '/' ]] || fatal "$name cannot be /"
+		[[ $value != *'..'* ]] || fatal "$name cannot contain '..': $value"
 	done
-	[[ $MIRROR != "$BACKUPS" ]] || fatal "MIRROR cannot equal BACKUPS"
+	[[ $MIRROR_MNT != "$BACKUP_MNT" ]] || fatal "MIRROR_MNT cannot equal BACKUP_MNT"
+	[[ $SNAPSHOT_DIR == "$BACKUP_MNT"/* ]] ||
+		fatal "SNAPSHOT_DIR must be under BACKUP_MNT: $SNAPSHOT_DIR"
+}
+
+cleanup_lock() {
+	rm -f "$LOCK"
+}
+
+acquire_lock() {
+	exec 9>"$LOCK"
+	if ! flock -n 9; then
+		info 'Another instance is running; exiting'
+		exit 0
+	fi
+	on_exit cleanup_lock
+}
+
+cleanup_mirror() {
+	umount -l "$MIRROR_MNT" >/dev/null 2>&1 || true
 }
 
 check_mounts() {
-	# Prevent silently filling up the root filesystem
-	findmnt -rn -t btrfs --mountpoint "$BACKUPS" >/dev/null 2>&1 ||
-		fatal "$BACKUPS is not mounted"
+	findmnt -rn -t btrfs --mountpoint "$BACKUP_MNT" >/dev/null 2>&1 ||
+		fatal "$BACKUP_MNT is not mounted"
 
-	if ! findmnt -rn --mountpoint "$MIRROR" >/dev/null 2>&1; then
-		mkdir -p "$MIRROR"
-		chmod 700 "$MIRROR"
+	if ! findmnt -rn --mountpoint "$MIRROR_MNT" >/dev/null 2>&1; then
+		mkdir -p "$MIRROR_MNT"
+		chmod 700 "$MIRROR_MNT"
 
-		info "Mounting $MIRROR"
+		info "Mounting $MIRROR_MNT"
 
-		mount "$MIRROR" || fatal "Failed to mount $MIRROR"
-		on_exit 'umount -l "$MIRROR" >/dev/null 2>&1 || true'
+		mount "$MIRROR_MNT" || fatal "Failed to mount $MIRROR_MNT"
+		on_exit cleanup_mirror
 	fi
-	btrfs subvolume show "$MIRROR" >/dev/null 2>&1 ||
-		fatal "$MIRROR is not a Btrfs subvolume"
+	btrfs subvolume show "$MIRROR_MNT" >/dev/null 2>&1 ||
+		fatal "$MIRROR_MNT is not a Btrfs subvolume"
+}
+
+create_dirs() {
+	mkdir -p "$STATE_DIR" "$METADATA_DIR" "$SNAPSHOT_DIR"
+	chmod 700 "$STATE_DIR" "$METADATA_DIR" "$SNAPSHOT_DIR"
 }
 
 write_metadata() {
-	# Recovery notes — small command outputs captured at backup time. Written
-	# under STATE_DIR on the live root so the rsync system pass mirrors them
-	# and btrbk's snapshot freezes a per-snapshot copy.
+	uname -a >"$METADATA_DIR/kernel.uname.txt" || true
 
-	# Kernel.
-	uname -a >"$LIVE_METADATA_DIR/kernel.uname.txt" || true
-
-	# Packages — dpkg covers .deb; snap and flatpak are separate ecosystems
-	# that aren't reflected in dpkg state.
 	dpkg-query -W -f='${binary:Package}\t${Version}\n' \
-		>"$LIVE_METADATA_DIR/packages.all.txt" || true
+		>"$METADATA_DIR/packages.all.txt" || true
 	apt-mark showmanual \
-		>"$LIVE_METADATA_DIR/packages.manual.txt" || true
+		>"$METADATA_DIR/packages.manual.txt" || true
 	if command -v flatpak >/dev/null; then
 		flatpak list --columns=application,version,branch,origin \
-			>"$LIVE_METADATA_DIR/packages.flatpak.txt" || true
+			>"$METADATA_DIR/packages.flatpak.txt" || true
 	fi
 	if command -v snap >/dev/null; then
 		snap list \
-			>"$LIVE_METADATA_DIR/packages.snap.txt" || true
+			>"$METADATA_DIR/packages.snap.txt" || true
 	fi
 
-	# Services.
 	systemctl list-unit-files --state=enabled \
-		>"$LIVE_METADATA_DIR/services.enabled.txt" || true
+		>"$METADATA_DIR/services.enabled.txt" || true
 
-	# Storage.
-	blkid >"$LIVE_METADATA_DIR/storage.blkid.txt" || true
-	findmnt >"$LIVE_METADATA_DIR/storage.findmnt.txt" || true
-	lsblk -f >"$LIVE_METADATA_DIR/storage.lsblk.txt" || true
+	blkid >"$METADATA_DIR/storage.blkid.txt" || true
+	findmnt >"$METADATA_DIR/storage.findmnt.txt" || true
+	lsblk -f >"$METADATA_DIR/storage.lsblk.txt" || true
 
-	# Users and groups — NSS-resolved view picks up LDAP/AD/SSSD sources that
-	# aren't visible in /etc/passwd alone.
-	getent group >"$LIVE_METADATA_DIR/users.group.txt" || true
-	getent passwd >"$LIVE_METADATA_DIR/users.passwd.txt" || true
+	getent group >"$METADATA_DIR/users.group.txt" || true
+	getent passwd >"$METADATA_DIR/users.passwd.txt" || true
 }
 
 run_rsync() {
-	info "Starting rsync mirror: / -> $MIRROR/"
+	info "Starting rsync mirror: / -> $MIRROR_MNT/"
 	local rc=0
 	rsync \
 		--info=del1,progress2,stats2 \
@@ -139,33 +141,34 @@ run_rsync() {
 		--delete-delay \
 		--delete-excluded \
 		--numeric-ids \
-		--exclude-from="$RSYNC_EXCLUDE_FILE" \
+		--exclude-from="$RSYNC_EXCLUDE" \
 		--human-readable \
-		/ "$MIRROR/" 1>&2 || rc=$?
+		/ "$MIRROR_MNT/" 1>&2 || rc=$?
 	# exit 24 is "some files vanished before transfer,"  benign on a live root.
 	((rc == 0 || rc == 24)) || return $rc
 }
 
 run_btrbk() {
 	info 'Running btrbk snapshot/prune'
-	# Generate a runtime config: static policy from $BTRBK_CONFIG_FILE plus the
-	# path-dependent volume block from $MIRROR / $SNAPSHOTS.
 	local conf='/run/system-snapshot.btrbk.conf'
-	{
-		cat "$BTRBK_CONFIG_FILE"
-		printf '\nvolume %s\n\tsubvolume .\n\t\tsnapshot_dir %s/\n' \
-			"$MIRROR" "$SNAPSHOTS"
-	} >"$conf"
+
+	cp --force -- "$BTRBK_CONF" "$conf"
+	cat >>"$conf" <<-BTRBK_CONF
+
+		subvolume '$MIRROR_MNT'
+			snapshot_create onchange
+			snapshot_dir '$SNAPSHOT_DIR'
+			snapshot_name system
+	BTRBK_CONF
 	btrbk -c "$conf" run 1>&2
 }
 
 main() {
-	local ignore_cadence=0
-
 	if (($# > 1)); then
 		fatal "Too many arguments: $*"
 	fi
 
+	local ignore_cadence=0
 	case ${1:-} in
 	--now) ignore_cadence=1 ;;
 	--init | '') ;;
@@ -175,22 +178,13 @@ main() {
 	check_paths
 
 	if ((ignore_cadence == 0)) && ! is_due; then
-		info "Not due---last successful backup was less than ${MIN_BACKUP_INTERVAL_DAYS} days ago. Pass \`--now\` to run anyway."
+		info "Not due---last successful backup was less than ${MIN_INTERVAL_DAYS} days ago. Pass \`--now\` to run anyway."
 		exit 0
 	fi
 
-	# Lock; complain loudly on contention rather than silently skipping.
-	exec 9>"$LOCK"
-	if ! flock -n 9; then
-		info 'Another instance is running; exiting'
-		exit 0
-	fi
-	on_exit 'rm -f "$LOCK"'
-
+	acquire_lock
 	check_mounts
-
-	mkdir -p "$STATE_DIR" "$LIVE_METADATA_DIR" "$SNAPSHOTS"
-	chmod 700 "$STATE_DIR" "$LIVE_METADATA_DIR" "$SNAPSHOTS"
+	create_dirs
 
 	if [[ ${1:-} == '--init' ]]; then
 		info 'Initialized layout only'
@@ -201,7 +195,7 @@ main() {
 	run_rsync
 	run_btrbk
 
-	date --iso-8601=seconds >"$LAST_SUCCESS_FILE"
+	date --iso-8601=seconds >"$LAST_SUCCESS"
 
 	info 'Backup completed successfully'
 }
