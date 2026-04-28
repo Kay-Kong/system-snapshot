@@ -17,7 +17,5 @@ STATE_DIR='/var/lib/system-snapshot'
 LAST_SUCCESS="$STATE_DIR/last-success"
 METADATA_DIR="$STATE_DIR/metadata"
 
-LOCK='/run/system-snapshot.lock'
-
 # Timer fires twice daily; real backups run after this many days.
 MIN_INTERVAL_DAYS=30

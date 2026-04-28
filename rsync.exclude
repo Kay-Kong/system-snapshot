@@ -29,13 +29,12 @@
 # User caches and generated tool state.
 # .cache covers pip, uv, torch, huggingface, npm/yarn XDG caches, Zed caches,
 # browser caches, and many other application caches.
-/home/**/.cache/
-/home/**/.local/share/Trash/
-/root/**/.cache/
+**/.cache/
+**/.local/share/Trash/
 
 # Remote editor/agent servers.
 /home/**/.antigravity/
-/home/**/.cache/code-server/
+#/home/**/.cache/code-server/
 /home/**/.continue/server/
 /home/**/.cursor-server/
 /home/**/.kiro-server/
@@ -47,75 +46,74 @@
 
 # AI coding agent disposable state.
 # Exclude bulky session/cache/log/checkpoint state.
-/home/**/.cache/Antigravity/
-/home/**/.cache/Google/Antigravity/
-/home/**/.claude/backups/
-/home/**/.claude/debug/
-/home/**/.claude/file-history/
-/home/**/.claude/image-cache/
-/home/**/.claude/paste-cache/
-/home/**/.claude/plans/
-/home/**/.claude/projects/*/*/tool-results/
-/home/**/.claude/session-env/
-/home/**/.claude/shell-snapshots/
-/home/**/.claude/tasks/
-/home/**/.claude/todos/
-/home/**/.codex/cache/
-/home/**/.codex/logs/
-/home/**/.codex/sessions/
-/home/**/.config/Antigravity/CachedData/
-/home/**/.config/Antigravity/Code Cache/
-/home/**/.config/Antigravity/Crashpad/
-/home/**/.config/Antigravity/GPUCache/
-/home/**/.config/Antigravity/logs/
-/home/**/.gemini/cache/
-/home/**/.gemini/tmp/
+#**/.cache/Antigravity/
+#**/.cache/Google/Antigravity/
+**/.claude/backups/
+**/.claude/debug/
+**/.claude/file-history/
+**/.claude/image-cache/
+**/.claude/paste-cache/
+**/.claude/plans/
+**/.claude/projects/*/*/tool-results/
+**/.claude/session-env/
+**/.claude/shell-snapshots/
+**/.claude/tasks/
+**/.claude/todos/
+**/.codex/cache/
+**/.codex/logs/
+**/.codex/sessions/
+**/.config/Antigravity/CachedData/
+**/.config/Antigravity/Code Cache/
+**/.config/Antigravity/Crashpad/
+**/.config/Antigravity/GPUCache/
+**/.config/Antigravity/logs/
+**/.gemini/cache/
+**/.gemini/tmp/
 
 # Language/package manager caches outside ~/.cache.
-/home/**/.cargo/git/
-/home/**/.cargo/registry/
-/home/**/.conda/pkgs/
-/home/**/.gradle/caches/
-/home/**/.gradle/daemon/
-/home/**/.ivy2/cache/
-/home/**/.julia/compiled/
-/home/**/.julia/logs/
-/home/**/.m2/repository/
-/home/**/.mamba/pkgs/
-/home/**/.micromamba/pkgs/
-/home/**/.node-gyp/
-/home/**/.npm/
-/home/**/.pnpm-store/
-/home/**/.rustup/downloads/
-/home/**/.rustup/tmp/
-/home/**/.sbt/
-/home/**/.yarn/cache/
-/home/**/anaconda3/pkgs/
-/home/**/go/pkg/mod/
-/home/**/go/pkg/sumdb/
-/home/**/miniconda3/pkgs/
-/root/.npm/
-/root/.nv/ComputeCache/
+**/.cargo/git/
+**/.cargo/registry/
+**/.conda/pkgs/
+**/.gradle/caches/
+**/.gradle/daemon/
+**/.ivy2/cache/
+**/.julia/compiled/
+**/.julia/logs/
+**/.m2/repository/
+**/.mamba/pkgs/
+**/.micromamba/pkgs/
+**/.node-gyp/
+**/.npm/
+**/.pnpm-store/
+**/.rustup/downloads/
+**/.rustup/tmp/
+**/.sbt/
+**/.yarn/cache/
+**/anaconda3/pkgs/
+**/go/pkg/mod/
+**/go/pkg/sumdb/
+**/miniconda3/pkgs/
 
 # ML/GPU/generated caches outside ~/.cache.
-/home/**/.ccache/
-/home/**/.nv/ComputeCache/
-/home/**/.triton/
+**/.ccache/
+**/.nv/ComputeCache/
+**/.triton/
 
 # Project-local dependency/build state.
-/home/**/*.pyc
-/home/**/.ipynb_checkpoints/
-/home/**/.mypy_cache/
-/home/**/.nox/
-/home/**/.pixi/
-/home/**/.pytest_cache/
-/home/**/.ruff_cache/
-/home/**/.terraform/
-/home/**/.tox/
-/home/**/.venv/
-/home/**/__pycache__/
-/home/**/node_modules/
-/home/**/venv/
+**/*.pyc
+**/*.pyo
+**/.ipynb_checkpoints/
+**/.mypy_cache/
+**/.nox/
+**/.pixi/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.terraform/
+**/.tox/
+**/.venv/
+**/__pycache__/
+**/node_modules/
+**/venv/
 
 # Optional huge/volatile stores.
 /var/lib/containers/**

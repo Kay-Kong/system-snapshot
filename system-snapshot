@@ -3,11 +3,6 @@ CONFIG='/etc/system-snapshot/system-snapshot.rc'
 
 set -euo pipefail
 
-[[ -r $CONFIG ]] || fatal "Missing config: $CONFIG"
-. "$CONFIG"
-
-MIN_INTERVAL=$((MIN_INTERVAL_DAYS * 24 * 3600))
-
 exit_hooks=()
 on_exit() {
 	exit_hooks=("$1" "${exit_hooks[@]}")
@@ -34,6 +29,12 @@ fatal() {
 	exit 1
 }
 
+load_config() {
+	[[ -r $CONFIG ]] || fatal "Missing config: $CONFIG"
+	. "$CONFIG"
+	LOCK=${LOCK:-'/run/system-snapshot.lock'}
+}
+
 is_due() {
 	local now="$(date +%s)" last=0
 
@@ -41,10 +42,13 @@ is_due() {
 		last="$(stat -c %Y "$LAST_SUCCESS")"
 	fi
 
-	((now - last >= MIN_INTERVAL))
+	((now - last >= $((MIN_INTERVAL_DAYS * 24 * 3600))))
 }
 
-check_paths() {
+check_config() {
+	[[ ${MIN_INTERVAL_DAYS:-} =~ ^[1-9][0-9]*$ ]] ||
+		fatal "MIN_INTERVAL_DAYS must be a positive integer: ${MIN_INTERVAL_DAYS:-unset}"
+
 	local name value
 	for name in \
 		MIRROR_MNT BACKUP_MNT SNAPSHOT_DIR \
@@ -100,31 +104,70 @@ create_dirs() {
 	chmod 700 "$STATE_DIR" "$METADATA_DIR" "$SNAPSHOT_DIR"
 }
 
+metadata_kernel() {
+	uname -a
+}
+
+metadata_packages_all() {
+	dpkg-query -W -f='${binary:Package}\t${Version}\n'
+}
+
+metadata_packages_manual() {
+	apt-mark showmanual
+}
+
+metadata_packages_flatpak() {
+	flatpak list --columns=application,version,branch,origin
+}
+
+metadata_packages_snap() {
+	snap list
+}
+
+metadata_services_enabled() {
+	systemctl list-unit-files --state=enabled
+}
+
+metadata_storage_blkid() {
+	blkid
+}
+
+metadata_storage_findmnt() {
+	findmnt
+}
+
+metadata_storage_lsblk() {
+	lsblk -f
+}
+
+metadata_users_group() {
+	getent group
+}
+
+metadata_users_passwd() {
+	getent passwd
+}
+
 write_metadata() {
-	uname -a >"$METADATA_DIR/kernel.uname.txt" || true
+	local cmd file i jobs=(
+		metadata_kernel kernel.uname.txt
+		metadata_packages_all packages.all.txt
+		metadata_packages_manual packages.manual.txt
+		metadata_packages_flatpak packages.flatpak.txt
+		metadata_packages_snap packages.snap.txt
+		metadata_services_enabled services.enabled.txt
+		metadata_storage_blkid storage.blkid.txt
+		metadata_storage_findmnt storage.findmnt.txt
+		metadata_storage_lsblk storage.lsblk.txt
+		metadata_users_group users.group.txt
+		metadata_users_passwd users.passwd.txt
+	)
 
-	dpkg-query -W -f='${binary:Package}\t${Version}\n' \
-		>"$METADATA_DIR/packages.all.txt" || true
-	apt-mark showmanual \
-		>"$METADATA_DIR/packages.manual.txt" || true
-	if command -v flatpak >/dev/null; then
-		flatpak list --columns=application,version,branch,origin \
-			>"$METADATA_DIR/packages.flatpak.txt" || true
-	fi
-	if command -v snap >/dev/null; then
-		snap list \
-			>"$METADATA_DIR/packages.snap.txt" || true
-	fi
-
-	systemctl list-unit-files --state=enabled \
-		>"$METADATA_DIR/services.enabled.txt" || true
-
-	blkid >"$METADATA_DIR/storage.blkid.txt" || true
-	findmnt >"$METADATA_DIR/storage.findmnt.txt" || true
-	lsblk -f >"$METADATA_DIR/storage.lsblk.txt" || true
-
-	getent group >"$METADATA_DIR/users.group.txt" || true
-	getent passwd >"$METADATA_DIR/users.passwd.txt" || true
+	for ((i = 0; i < ${#jobs[@]}; i += 2)); do
+		cmd=${jobs[i]}
+		file="$METADATA_DIR/${jobs[i + 1]}"
+		"$cmd" >"$file" || rm -f -- "$file"
+	done
 }
 
 run_rsync() {
@@ -164,9 +207,7 @@ run_btrbk() {
 }
 
 main() {
-	if (($# > 1)); then
-		fatal "Too many arguments: $*"
-	fi
+	(($# <= 1)) || fatal "Too many arguments: $*"
 
 	local ignore_cadence=0
 	case ${1:-} in
@@ -175,7 +216,8 @@ main() {
 	*) fatal "Unknown argument: $1" ;;
 	esac
 
-	check_paths
+	load_config
+	check_config
 
 	if ((ignore_cadence == 0)) && ! is_due; then
 		info "Not due---last successful backup was less than ${MIN_INTERVAL_DAYS} days ago. Pass \`--now\` to run anyway."
