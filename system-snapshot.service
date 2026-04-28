@@ -7,6 +7,7 @@ Type=oneshot
 Nice=19
 IOSchedulingClass=idle
 CPUSchedulingPolicy=idle
+ExecStartPre=/usr/local/libexec/system-snapshot/check-backup-mount
 ExecStart=/usr/local/sbin/system-snapshot
 
 # Sandboxing.

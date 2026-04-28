@@ -1,8 +1,11 @@
+# Backup-side mirror subvolume name. fstab uses subvol=@mirror.
+MIRROR_SUBVOL='mirror'
+
 # Mirror mount point. fstab should mount the backup subvolume here.
 MIRROR_MNT='/mnt/mirror'
 
-# Backup Btrfs filesystem mount point.
-BACKUP_MNT='/var/backups'
+# Backup filesystem mount point. check-backup-mount requires this to be mounted.
+BACKUP_MNT=/var/backups
 
 # btrbk snapshot destination, on the same Btrfs filesystem as MIRROR_MNT.
 SNAPSHOT_DIR="$BACKUP_MNT/local/system-snapshots"

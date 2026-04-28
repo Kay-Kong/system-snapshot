@@ -21,7 +21,7 @@ run_exit_hooks() {
 }
 
 info() {
-	printf '[INFO] %s\n' "$*" >&2
+	printf '[INFO]  %s\n' "$*" >&2
 }
 
 fatal() {
@@ -33,16 +33,6 @@ load_config() {
 	[[ -r $CONFIG ]] || fatal "Missing config: $CONFIG"
 	. "$CONFIG"
 	LOCK=${LOCK:-'/run/system-snapshot.lock'}
-}
-
-is_due() {
-	local now="$(date +%s)" last=0
-
-	if [[ -f $LAST_SUCCESS ]]; then
-		last="$(stat -c %Y "$LAST_SUCCESS")"
-	fi
-
-	((now - last >= $((MIN_INTERVAL_DAYS * 24 * 3600))))
 }
 
 check_config() {
@@ -60,9 +50,24 @@ check_config() {
 		[[ $value != '/' ]] || fatal "$name cannot be /"
 		[[ $value != *'..'* ]] || fatal "$name cannot contain '..': $value"
 	done
+	[[ ${MIRROR_SUBVOL:-} ]] || fatal "MIRROR_SUBVOL not set in $CONFIG"
+	[[ $MIRROR_SUBVOL != @* ]] ||
+		fatal "MIRROR_SUBVOL should omit the leading @: $MIRROR_SUBVOL"
 	[[ $MIRROR_MNT != "$BACKUP_MNT" ]] || fatal "MIRROR_MNT cannot equal BACKUP_MNT"
 	[[ $SNAPSHOT_DIR == "$BACKUP_MNT"/* ]] ||
 		fatal "SNAPSHOT_DIR must be under BACKUP_MNT: $SNAPSHOT_DIR"
+
+	rsync --dry-run --exclude-from="$RSYNC_EXCLUDE" --files-from=/dev/null / / >/dev/null
+}
+
+is_due() {
+	local now="$(date +%s)" last=0
+
+	if [[ -f $LAST_SUCCESS ]]; then
+		last="$(stat -c %Y "$LAST_SUCCESS")"
+	fi
+
+	((now - last >= $((MIN_INTERVAL_DAYS * 24 * 3600))))
 }
 
 cleanup_lock() {
@@ -78,30 +83,47 @@ acquire_lock() {
 	on_exit cleanup_lock
 }
 
+create_dirs() {
+	mkdir -p "$STATE_DIR" "$METADATA_DIR" "$SNAPSHOT_DIR"
+	chmod 700 "$STATE_DIR" "$METADATA_DIR" "$SNAPSHOT_DIR"
+}
+
 cleanup_mirror() {
 	umount -l "$MIRROR_MNT" >/dev/null 2>&1 || true
 }
 
 check_mounts() {
-	findmnt -rn -t btrfs --mountpoint "$BACKUP_MNT" >/dev/null 2>&1 ||
-		fatal "$BACKUP_MNT is not mounted"
+	local mounted_subvol expected_subvol snapshot_dir \
+		btrbk_conf='/run/system-snapshot.btrbk.conf'
 
 	if ! findmnt -rn --mountpoint "$MIRROR_MNT" >/dev/null 2>&1; then
-		mkdir -p "$MIRROR_MNT"
-		chmod 700 "$MIRROR_MNT"
-
 		info "Mounting $MIRROR_MNT"
 
+		mkdir -p "$MIRROR_MNT"
+		chmod 700 "$MIRROR_MNT"
 		mount "$MIRROR_MNT" || fatal "Failed to mount $MIRROR_MNT"
 		on_exit cleanup_mirror
 	fi
 	btrfs subvolume show "$MIRROR_MNT" >/dev/null 2>&1 ||
 		fatal "$MIRROR_MNT is not a Btrfs subvolume"
-}
 
-create_dirs() {
-	mkdir -p "$STATE_DIR" "$METADATA_DIR" "$SNAPSHOT_DIR"
-	chmod 700 "$STATE_DIR" "$METADATA_DIR" "$SNAPSHOT_DIR"
+	mounted_subvol=$(findmnt -rn -o FSROOT --mountpoint "$MIRROR_MNT")
+	expected_subvol="/@$MIRROR_SUBVOL"
+	[[ $mounted_subvol == "$expected_subvol" ]] ||
+		fatal "$MIRROR_MNT is $mounted_subvol, expected $expected_subvol"
+
+	snapshot_dir=${SNAPSHOT_DIR#"$BACKUP_MNT"/}
+	cp --force -- "$BTRBK_CONF" "$btrbk_conf"
+	cat >>"$btrbk_conf" <<-BTRBK_CONF
+
+		volume $MIRROR_MNT
+			subvolume @$MIRROR_SUBVOL
+				snapshot_dir $snapshot_dir
+				snapshot_name system
+	BTRBK_CONF
+	BTRBK_CONF=$btrbk_conf
+
+	btrbk --quiet -c "$BTRBK_CONF" dryrun 1>&2
 }
 
 metadata_kernel() {
@@ -170,9 +192,28 @@ write_metadata() {
 	done
 }
 
+filter_rsync_output() {
+	local line now last=0 \
+		progress_re='[(]xfr#[0-9]+, (ir|to)-chk=[0-9]+/[0-9]+[)]'
+
+	while IFS= read -r line || [[ $line ]]; do
+		if [[ $line =~ $progress_re ]]; then
+			now=$(date +%s)
+			if ((now - last >= 30)) || [[ $line == *100%* ]]; then
+				printf '%s\n' "$line"
+				last=$now
+			fi
+		else
+			printf '%s\n' "$line"
+		fi
+	done
+}
+
 run_rsync() {
+	local status=()
 	info "Starting rsync mirror: / -> $MIRROR_MNT/"
-	local rc=0
+
+	set +e
 	rsync \
 		--info=del1,progress2,stats2 \
 		--checksum \
@@ -184,26 +225,24 @@ run_rsync() {
 		--delete-delay \
 		--delete-excluded \
 		--numeric-ids \
+		--fuzzy \
 		--exclude-from="$RSYNC_EXCLUDE" \
 		--human-readable \
-		/ "$MIRROR_MNT/" 1>&2 || rc=$?
+		/ "$MIRROR_MNT/" 2>&1 |
+		stdbuf -o0 tr '\r' '\n' |
+		filter_rsync_output 1>&2
+	status=("${PIPESTATUS[@]}")
+	set -e
+
+	((status[2] == 0)) || return "${status[2]}"
+	((status[1] == 0)) || return "${status[1]}"
 	# exit 24 is "some files vanished before transfer,"  benign on a live root.
-	((rc == 0 || rc == 24)) || return $rc
+	((status[0] == 0 || status[0] == 24)) || return "${status[0]}"
 }
 
 run_btrbk() {
 	info 'Running btrbk snapshot/prune'
-	local conf='/run/system-snapshot.btrbk.conf'
-
-	cp --force -- "$BTRBK_CONF" "$conf"
-	cat >>"$conf" <<-BTRBK_CONF
-
-		subvolume '$MIRROR_MNT'
-			snapshot_create onchange
-			snapshot_dir '$SNAPSHOT_DIR'
-			snapshot_name system
-	BTRBK_CONF
-	btrbk -c "$conf" run 1>&2
+	btrbk -c "$BTRBK_CONF" run 1>&2
 }
 
 main() {
@@ -225,8 +264,8 @@ main() {
 	fi
 
 	acquire_lock
-	check_mounts
 	create_dirs
+	check_mounts
 
 	if [[ ${1:-} == '--init' ]]; then
 		info 'Initialized layout only'

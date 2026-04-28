@@ -30,6 +30,7 @@ automatically.
 /etc/system-snapshot/{btrbk.conf,rsync.exclude,system-snapshot.rc}
 /etc/systemd/system/{system-snapshot.service,system-snapshot.timer}
 /mnt/mirror/                                     # Btrfs subvolume, mounted on demand
+/usr/local/libexec/system-snapshot/check-backup-mount
 /usr/local/sbin/system-snapshot
 /var/backups/local/system-snapshots/             # btrbk subvolumes: system.<ts>
 /var/lib/system-snapshot/{last-success,metadata/}
@@ -53,27 +54,29 @@ Prerequisites:
 Run from the repo root:
 
 ```bash
-# Configs.
+# Configs
 install -m 755 -d /etc/system-snapshot
 install -m 644 btrbk.conf rsync.exclude system-snapshot.rc /etc/system-snapshot/
 
-# Script.
-install -m 755 system-snapshot /usr/local/sbin/system-snapshot
+# Scripts
+install -m 755 system-snapshot /usr/local/sbin/
+install -m 755 -d /usr/local/libexec/system-snapshot
+install -m 755 check-backup-mount /usr/local/libexec/system-snapshot/
 
-# systemd units.
+# systemd units
 install -m 644 system-snapshot.service system-snapshot.timer \
     /etc/systemd/system/
 
-# State directory + snapshots dir.
+# State directory + snapshots dir
 install -m 700 -d /var/lib/system-snapshot
 /usr/local/sbin/system-snapshot --init
 
-# Activate the timer.
+# Activate the timer
 systemctl daemon-reload
 systemctl enable --now system-snapshot.timer
 
 # Optional: trigger the first real backup now (otherwise it runs at the
-# next 00:00 / 12:00 firing).
+# next 00:00 / 12:00 firing)
 /usr/local/sbin/system-snapshot --now
 ```
 
@@ -89,10 +92,10 @@ journalctl -u system-snapshot.service -n 100 --no-pager
 # What snapshots exist?
 ls /var/backups/local/system-snapshots/
 
-# Run unconditionally now.
+# Run unconditionally now
 /usr/local/sbin/system-snapshot --now
 
-# Pause (timer stays disabled until you re-enable).
+# Pause (timer stays disabled until you re-enable)
 systemctl disable --now system-snapshot.timer
 ```
 
