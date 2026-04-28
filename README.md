@@ -1,17 +1,19 @@
 # system-snapshot
 
 Local backup of the EXT4 root to a Btrfs mirror, then versioned with btrbk
-snapshots. Designed for hosts where `/` is on an SSD (EXT4) and `/var/backups`
-is a mounted Btrfs filesystem on a separate disk (typically an HDD). CoW makes
-repeated snapshots cheap.
+snapshots. Designed for hosts where `/` is on an SSD (EXT4) and a Btrfs storage
+volume is mounted on a separate disk (typically an HDD). CoW makes repeated
+snapshots cheap.
 
 ## How it works
 
-1. **rsync** mirrors `/` to `/mnt/mirror/`, a Btrfs subvolume mounted on
-   demand from the backup filesystem. Excludes (caches, container images,
-   dev-tool servers, etc.) live in `rsync.exclude`.
-2. **btrbk** snapshots the mirror to `/var/backups/local/system-snapshots/`.
-   Retention: minimum 48 h, then 14 daily / 8 weekly / 12 monthly.
+1. **rsync** mirrors `/` to `/mnt/storage/@mirror/`, a Btrfs subvolume
+   on the storage volume. Excludes (caches, container images, dev-tool servers,
+   etc.) live in `rsync.exclude`.
+2. **btrbk** snapshots the mirror to
+   `/mnt/storage/@backups/local/system-snapshots/`.
+   Snapshots are named `<hostname>.<timestamp>`. Retention: minimum 48 h,
+   then 14 daily / 8 weekly / 12 monthly.
 3. **Recovery metadata** (package list, NSS users/groups, enabled services,
    storage layout, kernel) is written to `/var/lib/system-snapshot/metadata/`
    on the live root, so step 1 sweeps it into the mirror and step 2 freezes
@@ -29,26 +31,29 @@ automatically.
 ```
 /etc/system-snapshot/{btrbk.conf,rsync.exclude,system-snapshot.rc}
 /etc/systemd/system/{system-snapshot.service,system-snapshot.timer}
-/mnt/mirror/                                     # Btrfs subvolume, mounted on demand
-/usr/local/libexec/system-snapshot/check-backup-mount
+/mnt/storage/                                   # Btrfs top-level volume, mounted on demand
 /usr/local/sbin/system-snapshot
-/var/backups/local/system-snapshots/             # btrbk subvolumes: system.<ts>
+/mnt/storage/@backups/local/system-snapshots/    # btrbk subvolumes: <hostname>.<ts>
 /var/lib/system-snapshot/{last-success,metadata/}
 ```
 
-`/mnt/mirror/` is a Btrfs subvolume on the backup filesystem. The systemd
-service mounts it via `/etc/fstab` only for the duration of a run and
-`umount -l`s it on exit. `metadata/` lives on the live root so it travels
-into the mirror with the regular rsync pass.
+`/mnt/storage/` is the Btrfs top-level volume mount. The script mounts
+it via `/etc/fstab` only for the duration of a run and `umount -l`s it on exit.
+`metadata/` lives on the live root so it travels into the mirror with the
+regular rsync pass.
+Concurrent invocations are serialized by a runtime-only flock at
+`/run/system-snapshot.lock`.
 
 ## Deployment
 
 Prerequisites:
-- `/var/backups` is a mounted Btrfs subvolume.
-- `/var/backups/@mirror` exists as a Btrfs subvolume.
-- `/etc/fstab` has a `noauto` entry for `/mnt/mirror` on the same Btrfs
-  filesystem. Recommended options:
-  `noatime,nodev,nosuid,noexec,nofail,x-systemd.device-timeout=30s,compress=zstd:9,subvol=@mirror`
+- `/mnt/storage` mounts the Btrfs top-level volume.
+- `/mnt/storage/@mirror` exists as a Btrfs subvolume.
+- `/mnt/storage/@backups/local/system-snapshots` exists or can be
+  created by the script.
+- `/etc/fstab` has a `noauto` entry for `/mnt/storage`. Recommended
+  options:
+  `noatime,nodev,nosuid,noexec,nofail,x-systemd.device-timeout=30s,compress=zstd:9,subvolid=5`
 - You are running as root.
 
 Run from the repo root:
@@ -58,10 +63,8 @@ Run from the repo root:
 install -m 755 -d /etc/system-snapshot
 install -m 644 btrbk.conf rsync.exclude system-snapshot.rc /etc/system-snapshot/
 
-# Scripts
+# Script
 install -m 755 system-snapshot /usr/local/sbin/
-install -m 755 -d /usr/local/libexec/system-snapshot
-install -m 755 check-backup-mount /usr/local/libexec/system-snapshot/
 
 # systemd units
 install -m 644 system-snapshot.service system-snapshot.timer \
@@ -86,11 +89,20 @@ systemctl enable --now system-snapshot.timer
 # When does it next run?
 systemctl list-timers system-snapshot.timer
 
+# Show service/timer state
+systemctl status system-snapshot.service system-snapshot.timer
+
 # How did the last run go?
 journalctl -u system-snapshot.service -n 100 --no-pager
 
+# Follow a live backup
+journalctl -fu system-snapshot.service
+
 # What snapshots exist?
-ls /var/backups/local/system-snapshots/
+ls /mnt/storage/@backups/local/system-snapshots/
+
+# Run through systemd, respecting cadence
+systemctl start system-snapshot.service
 
 # Run unconditionally now
 /usr/local/sbin/system-snapshot --now
@@ -106,7 +118,7 @@ A snapshot is a complete root mirror (minus the paths in `rsync.exclude`).
 Single file:
 
 ```bash
-snap=/var/backups/local/system-snapshots/system.YYYY-MM-DDTHH-MM-SS
+snap=/mnt/storage/@backups/local/system-snapshots/HOSTNAME.<ts>
 cp --archive "$snap/etc/foo" /etc/foo
 ```
 
@@ -122,7 +134,7 @@ rsync \
     --delete \
     --numeric-ids \
     --human-readable \
-    /mnt/backup/local/system-snapshots/system.<ts>/ /mnt/restore/
+    /mnt/storage/@backups/local/system-snapshots/HOSTNAME.<ts>/ /mnt/restore/
 ```
 
 The `metadata/` directory inside each snapshot has the package list, enabled
@@ -157,12 +169,16 @@ on fresh hardware before the rsync restore.
   transfer changed blocks and only re-hash modified files.
 - **Cadence is enforced by `last-success` mtime.** Don't `touch` that file
   manually; pass `--now` to override the cadence check.
-- **`/mnt/mirror/` is only mounted while a backup is running.** The
+- **btrbk always includes a snapshot basename.** The script uses the short
+  hostname by default, producing `<hostname>.<timestamp>` snapshots. Set
+  `SNAPSHOT_NAME` in `system-snapshot.rc` only if you need a different stable
+  basename.
+- **`/mnt/storage/` is only mounted while a backup is running.** The
   script `mount`s it via fstab when it begins a real run and `umount -l`s
   it on exit (via a bash `EXIT` trap), so manual runs (`system-snapshot
   --now`) get the same mount/umount lifecycle as the timer. To browse
   the mirror outside a run, look at the latest snapshot under
-  `/var/backups/local/system-snapshots/` instead.
+  `/mnt/storage/@backups/local/system-snapshots/` instead.
 - **The source root is live during the backup.** rsync reads files over
   several minutes and the kernel keeps writing to `/` the whole time. A
   file modified mid-pass can land in the mirror with mixed-version content,

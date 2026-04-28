@@ -1,5 +1,5 @@
 [Unit]
-Description=Rsync system mirror and create Btrfs snapshot
+Description=Regular system snapshot
 ConditionACPower=true
 
 [Service]
@@ -7,7 +7,6 @@ Type=oneshot
 Nice=19
 IOSchedulingClass=idle
 CPUSchedulingPolicy=idle
-ExecStartPre=/usr/local/libexec/system-snapshot/check-backup-mount
 ExecStart=/usr/local/sbin/system-snapshot
 
 # Sandboxing.

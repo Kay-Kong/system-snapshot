@@ -14,6 +14,9 @@
 /boot/lost+found/
 /lost+found/
 
+# Swap file.
+/swap.img
+
 # Already on the HDD, do not back up into the system mirror.
 /var/backups/**
 /var/crash/**

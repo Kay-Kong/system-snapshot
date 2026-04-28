@@ -32,36 +32,53 @@ fatal() {
 load_config() {
 	[[ -r $CONFIG ]] || fatal "Missing config: $CONFIG"
 	. "$CONFIG"
-	LOCK=${LOCK:-'/run/system-snapshot.lock'}
 }
 
 check_config() {
 	[[ ${MIN_INTERVAL_DAYS:-} =~ ^[1-9][0-9]*$ ]] ||
 		fatal "MIN_INTERVAL_DAYS must be a positive integer: ${MIN_INTERVAL_DAYS:-unset}"
 
-	local name value
+	local name value path_type
 	for name in \
-		MIRROR_MNT BACKUP_MNT SNAPSHOT_DIR \
-		STATE_DIR LAST_SUCCESS METADATA_DIR \
-		LOCK BTRBK_CONF RSYNC_EXCLUDE; do
+		STORAGE_MNT \
+		MIRROR_SUBVOL \
+		STATE_DIR LAST_SUCCESS METADATA_DIR SNAPSHOT_DIR \
+		BTRBK_CONF RSYNC_EXCLUDE; do
 		value=${!name:-}
 		[[ -n $value ]] || fatal "$name not set in $CONFIG"
-		[[ $value == /* ]] || fatal "$name must be absolute: $value"
+
 		[[ $value != '/' ]] || fatal "$name cannot be /"
 		[[ $value != *'..'* ]] || fatal "$name cannot contain '..': $value"
+		case $name in
+		MIRROR_SUBVOL | SNAPSHOT_DIR)
+			path_type='relative'
+			[[ $value != /* ]]
+			;;
+		*)
+			path_type='absolute'
+			[[ $value == /* ]]
+			;;
+		esac || fatal "$name must be $path_type: $value"
 	done
-	[[ ${MIRROR_SUBVOL:-} ]] || fatal "MIRROR_SUBVOL not set in $CONFIG"
-	[[ $MIRROR_SUBVOL != @* ]] ||
-		fatal "MIRROR_SUBVOL should omit the leading @: $MIRROR_SUBVOL"
-	[[ $MIRROR_MNT != "$BACKUP_MNT" ]] || fatal "MIRROR_MNT cannot equal BACKUP_MNT"
-	[[ $SNAPSHOT_DIR == "$BACKUP_MNT"/* ]] ||
-		fatal "SNAPSHOT_DIR must be under BACKUP_MNT: $SNAPSHOT_DIR"
+	[[ $MIRROR_SUBVOL == @* ]] ||
+		fatal "MIRROR_SUBVOL should not omit the leading @: $MIRROR_SUBVOL"
+	[[ $SNAPSHOT_DIR != "$MIRROR_SUBVOL" ]] ||
+		fatal "SNAPSHOT_DIR cannot equal MIRROR_SUBVOL: $SNAPSHOT_DIR"
+	[[ $SNAPSHOT_DIR != "$MIRROR_SUBVOL"/* ]] ||
+		fatal "SNAPSHOT_DIR cannot be under MIRROR_SUBVOL: $SNAPSHOT_DIR"
+	[[ ${SNAPSHOT_NAME:-} != *'/'* ]] ||
+		fatal "SNAPSHOT_NAME cannot contain '/': $SNAPSHOT_NAME"
+	[[ ${SNAPSHOT_NAME:-} != *'..'* ]] ||
+		fatal "SNAPSHOT_NAME cannot contain '..': $SNAPSHOT_NAME"
+	if [[ -n ${SNAPSHOT_NAME:-} && ! $SNAPSHOT_NAME =~ ^[A-Za-z0-9_-]+$ ]]; then
+		fatal "SNAPSHOT_NAME may only contain letters, numbers, '_' and '-': $SNAPSHOT_NAME"
+	fi
 
 	rsync --dry-run --exclude-from="$RSYNC_EXCLUDE" --files-from=/dev/null / / >/dev/null
 }
 
 is_due() {
-	local now="$(date +%s)" last=0
+	local last=0 now="$(date +%s)"
 
 	if [[ -f $LAST_SUCCESS ]]; then
 		last="$(stat -c %Y "$LAST_SUCCESS")"
@@ -70,56 +87,67 @@ is_due() {
 	((now - last >= $((MIN_INTERVAL_DAYS * 24 * 3600))))
 }
 
-cleanup_lock() {
+release_lock() {
 	rm -f "$LOCK"
+	info "Released lock $LOCK"
 }
 
 acquire_lock() {
+	LOCK='/run/system-snapshot.lock'
+	info "Acquiring lock $LOCK"
+
 	exec 9>"$LOCK"
 	if ! flock -n 9; then
 		info 'Another instance is running; exiting'
 		exit 0
 	fi
-	on_exit cleanup_lock
+	on_exit release_lock
 }
 
-create_dirs() {
-	mkdir -p "$STATE_DIR" "$METADATA_DIR" "$SNAPSHOT_DIR"
-	chmod 700 "$STATE_DIR" "$METADATA_DIR" "$SNAPSHOT_DIR"
+default_snapshot_name() {
+	local name=$(hostname 2>/dev/null || true)
+	name=${name%%.*}
+	name=${name//[^A-Za-z0-9_-]/-}
+	name=${name#"${name%%[!-]*}"}
+	name=${name%"${name##*[!-]}"}
+	[[ -n $name ]] || name='localhost'
+	printf '%s\n' "$name"
 }
 
-cleanup_mirror() {
-	umount -l "$MIRROR_MNT" >/dev/null 2>&1 || true
+unmount_storage() {
+	umount -l "$STORAGE_MNT" >/dev/null 2>&1 || true
+	info "Unmounted $STORAGE_MNT"
+}
+
+mount_storage() {
+	info "Mounting $STORAGE_MNT"
+
+	install -m 700 -d "$STORAGE_MNT"
+	mount "$STORAGE_MNT" || fatal "Failed to mount $STORAGE_MNT"
+	on_exit unmount_storage
 }
 
 check_mounts() {
-	local mounted_subvol expected_subvol snapshot_dir \
-		btrbk_conf='/run/system-snapshot.btrbk.conf'
+	local mirror_dir="$STORAGE_MNT/$MIRROR_SUBVOL" \
+		snapshot_dir="$STORAGE_MNT/$SNAPSHOT_DIR" \
+		btrbk_conf='/run/system-snapshot.btrbk.conf' \
+		snapshot_name="${SNAPSHOT_NAME:-$(default_snapshot_name)}"
 
-	if ! findmnt -rn --mountpoint "$MIRROR_MNT" >/dev/null 2>&1; then
-		info "Mounting $MIRROR_MNT"
+	findmnt -rn --mountpoint "$STORAGE_MNT" >/dev/null 2>&1 || mount_storage
 
-		mkdir -p "$MIRROR_MNT"
-		chmod 700 "$MIRROR_MNT"
-		mount "$MIRROR_MNT" || fatal "Failed to mount $MIRROR_MNT"
-		on_exit cleanup_mirror
-	fi
-	btrfs subvolume show "$MIRROR_MNT" >/dev/null 2>&1 ||
-		fatal "$MIRROR_MNT is not a Btrfs subvolume"
+	for dir in "$STORAGE_MNT" "$mirror_dir"; do
+		btrfs subvolume show "$dir" >/dev/null 2>&1 ||
+			fatal "$dir is not a Btrfs subvolume"
+	done
 
-	mounted_subvol=$(findmnt -rn -o FSROOT --mountpoint "$MIRROR_MNT")
-	expected_subvol="/@$MIRROR_SUBVOL"
-	[[ $mounted_subvol == "$expected_subvol" ]] ||
-		fatal "$MIRROR_MNT is $mounted_subvol, expected $expected_subvol"
-
-	snapshot_dir=${SNAPSHOT_DIR#"$BACKUP_MNT"/}
+	install -m 700 -d "$snapshot_dir"
 	cp --force -- "$BTRBK_CONF" "$btrbk_conf"
 	cat >>"$btrbk_conf" <<-BTRBK_CONF
 
-		volume $MIRROR_MNT
-			subvolume @$MIRROR_SUBVOL
-				snapshot_dir $snapshot_dir
-				snapshot_name system
+		volume $STORAGE_MNT
+			subvolume $MIRROR_SUBVOL
+				snapshot_dir $SNAPSHOT_DIR
+				snapshot_name $snapshot_name
 	BTRBK_CONF
 	BTRBK_CONF=$btrbk_conf
 
@@ -210,8 +238,8 @@ filter_rsync_output() {
 }
 
 run_rsync() {
-	local status=()
-	info "Starting rsync mirror: / -> $MIRROR_MNT/"
+	local status=() mirror_dir="$STORAGE_MNT/$MIRROR_SUBVOL"
+	info "Starting rsync mirror: / -> $mirror_dir/"
 
 	set +e
 	rsync \
@@ -228,7 +256,7 @@ run_rsync() {
 		--fuzzy \
 		--exclude-from="$RSYNC_EXCLUDE" \
 		--human-readable \
-		/ "$MIRROR_MNT/" 2>&1 |
+		/ "$mirror_dir/" 2>&1 |
 		stdbuf -o0 tr '\r' '\n' |
 		filter_rsync_output 1>&2
 	status=("${PIPESTATUS[@]}")
@@ -264,7 +292,7 @@ main() {
 	fi
 
 	acquire_lock
-	create_dirs
+	install -m 700 -d "$STATE_DIR" "$METADATA_DIR"
 	check_mounts
 
 	if [[ ${1:-} == '--init' ]]; then
