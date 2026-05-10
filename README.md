@@ -11,7 +11,7 @@ snapshots cheap.
    on the storage volume. Excludes (caches, container images, dev-tool servers,
    etc.) live in `rsync.exclude`.
 2. **btrbk** snapshots the mirror to
-   `/mnt/storage/@backups/local/system-snapshots/`.
+   `/mnt/storage/@local-backups/system-snapshots/`.
    Snapshots are named `<hostname>.<timestamp>`. Retention: minimum 48 h,
    then 14 daily / 8 weekly / 12 monthly.
 3. **Recovery metadata** (package list, NSS users/groups, enabled services,
@@ -33,7 +33,7 @@ automatically.
 /etc/systemd/system/{system-snapshot.service,system-snapshot.timer}
 /mnt/storage/                                   # Btrfs top-level volume, mounted on demand
 /usr/local/sbin/system-snapshot
-/mnt/storage/@backups/local/system-snapshots/    # btrbk subvolumes: <hostname>.<ts>
+/mnt/storage/@local-backups/system-snapshots/    # btrbk subvolumes: <hostname>.<ts>
 /var/lib/system-snapshot/{last-success,metadata/}
 ```
 
@@ -49,7 +49,7 @@ Concurrent invocations are serialized by a runtime-only flock at
 Prerequisites:
 - `/mnt/storage` mounts the Btrfs top-level volume.
 - `/mnt/storage/@mirror` exists as a Btrfs subvolume.
-- `/mnt/storage/@backups/local/system-snapshots` exists or can be
+- `/mnt/storage/@local-backups/system-snapshots` exists or can be
   created by the script.
 - `/etc/fstab` has a `noauto` entry for `/mnt/storage`. Recommended
   options:
@@ -99,7 +99,7 @@ journalctl -u system-snapshot.service -n 100 --no-pager
 journalctl -fu system-snapshot.service
 
 # What snapshots exist?
-ls /mnt/storage/@backups/local/system-snapshots/
+ls /mnt/storage/@local-backups/system-snapshots/
 
 # Run through systemd, respecting cadence
 systemctl start system-snapshot.service
@@ -118,7 +118,7 @@ A snapshot is a complete root mirror (minus the paths in `rsync.exclude`).
 Single file:
 
 ```bash
-snap=/mnt/storage/@backups/local/system-snapshots/HOSTNAME.<ts>
+snap=/mnt/storage/@local-backups/system-snapshots/HOSTNAME.<ts>
 cp --archive "$snap/etc/foo" /etc/foo
 ```
 
@@ -134,7 +134,7 @@ rsync \
     --delete \
     --numeric-ids \
     --human-readable \
-    /mnt/storage/@backups/local/system-snapshots/HOSTNAME.<ts>/ /mnt/restore/
+    /mnt/storage/@local-backups/system-snapshots/HOSTNAME.<ts>/ /mnt/restore/
 ```
 
 The `metadata/` directory inside each snapshot has the package list, enabled
@@ -178,7 +178,7 @@ on fresh hardware before the rsync restore.
   it on exit (via a bash `EXIT` trap), so manual runs (`system-snapshot
   --now`) get the same mount/umount lifecycle as the timer. To browse
   the mirror outside a run, look at the latest snapshot under
-  `/mnt/storage/@backups/local/system-snapshots/` instead.
+  `/mnt/storage/@local-backups/system-snapshots/` instead.
 - **The source root is live during the backup.** rsync reads files over
   several minutes and the kernel keeps writing to `/` the whole time. A
   file modified mid-pass can land in the mirror with mixed-version content,

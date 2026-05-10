@@ -5,7 +5,7 @@ STORAGE_MNT=/mnt/storage
 MIRROR_SUBVOL='@mirror'
 
 # btrbk snapshot destination, relative to STORAGE_MNT.
-SNAPSHOT_DIR='@backups/local/system-snapshots'
+SNAPSHOT_DIR='@local-backups/system-snapshots'
 
 # Optional btrbk snapshot basename. Leave unset to use the short hostname.
 # btrbk always stores snapshots as <basename>.<timestamp>.
